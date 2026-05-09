@@ -1,0 +1,4 @@
+[submodule "third_party/hermes"]
+	path = third_party/hermes
+	url = https://github.com/glennc/hermes-agent.git
+	branch = foundry-tui-poc

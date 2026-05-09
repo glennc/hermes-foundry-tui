@@ -1,0 +1,5 @@
+.azure/
+.git/
+.github/
+agent/.venv/
+third_party/hermes/

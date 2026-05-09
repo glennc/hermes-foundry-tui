@@ -1,0 +1,19 @@
+.DS_Store
+
+# Local environment and azd state
+.azure/
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node / TUI builds from local checkouts
+node_modules/
+dist/
+build/

@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/AgentManifest.yaml
+name: hermes-foundry-agent
+displayName: Hermes Foundry Agent
+description: Hosted Hermes worker for the Hermes TUI Foundry PoC.
+metadata:
+  tags:
+    - Hermes
+template:
+  name: hermes-foundry-agent
+  kind: hosted
+  protocols:
+    - protocol: invocations
+      version: 1.0.0
+resources: []
