@@ -10,6 +10,8 @@ services:
         host: azure.ai.agent
         language: docker
         docker:
+            path: Dockerfile
+            context: ..
             remoteBuild: true
         config:
             container:
@@ -20,3 +22,92 @@ services:
 infra:
     provider: bicep
     path: ./infra
+hooks:
+    postdeploy:
+        windows:
+            shell: pwsh
+            run: |
+                $openAiUserRoleId = "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+                $subscriptionId = azd env get-value AZURE_SUBSCRIPTION_ID 2>$null
+                $aiAccountId = azd env get-value AZURE_AI_ACCOUNT_ID 2>$null
+                if (-not $subscriptionId -or -not $aiAccountId) {
+                    throw "AZURE_SUBSCRIPTION_ID or AZURE_AI_ACCOUNT_ID is not set in the azd environment."
+                }
+
+                $agent = azd ai agent show --output json | ConvertFrom-Json
+                $agentPrincipalId = $agent.instance_identity.principal_id
+                if (-not $agentPrincipalId) {
+                    throw "Could not resolve hosted agent managed identity principal id."
+                }
+
+                $roleDefinitionId = "/subscriptions/$subscriptionId/providers/Microsoft.Authorization/roleDefinitions/$openAiUserRoleId"
+                $query = "[?roleDefinitionId=='$roleDefinitionId'].id | [0]"
+                $existing = az role assignment list `
+                    --assignee-object-id $agentPrincipalId `
+                    --scope $aiAccountId `
+                    --fill-principal-name false `
+                    --query $query `
+                    -o tsv 2>$null
+                if (-not $existing) {
+                    az role assignment create `
+                        --assignee-object-id $agentPrincipalId `
+                        --assignee-principal-type ServicePrincipal `
+                        --role $openAiUserRoleId `
+                        --scope $aiAccountId | Out-Null
+                }
+        posix:
+            name: postdeploy
+            kind: sh
+            shell: sh
+            run: |
+                OPENAI_USER_ROLE_ID="5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+                SUBSCRIPTION_ID="$(azd env get-value AZURE_SUBSCRIPTION_ID 2>/dev/null || true)"
+                AI_ACCOUNT_ID="$(azd env get-value AZURE_AI_ACCOUNT_ID 2>/dev/null || true)"
+                if [ -z "$SUBSCRIPTION_ID" ] || [ -z "$AI_ACCOUNT_ID" ]; then
+                    echo "AZURE_SUBSCRIPTION_ID or AZURE_AI_ACCOUNT_ID is not set in the azd environment." >&2
+                    exit 1
+                fi
+
+                AGENT_PRINCIPAL_ID="$(azd ai agent show --output json | python3 -c 'import json, sys; print(((json.load(sys.stdin).get("instance_identity") or {}).get("principal_id")) or "")')"
+                if [ -z "$AGENT_PRINCIPAL_ID" ]; then
+                    echo "Could not resolve hosted agent managed identity principal id." >&2
+                    exit 1
+                fi
+
+                ROLE_DEFINITION_ID="/subscriptions/$SUBSCRIPTION_ID/providers/Microsoft.Authorization/roleDefinitions/$OPENAI_USER_ROLE_ID"
+                EXISTING="$(az role assignment list \
+                    --assignee-object-id "$AGENT_PRINCIPAL_ID" \
+                    --scope "$AI_ACCOUNT_ID" \
+                    --fill-principal-name false \
+                    --query "[?roleDefinitionId=='$ROLE_DEFINITION_ID'].id | [0]" \
+                    -o tsv 2>/dev/null || true)"
+                if [ -z "$EXISTING" ]; then
+                    az role assignment create \
+                        --assignee-object-id "$AGENT_PRINCIPAL_ID" \
+                        --assignee-principal-type ServicePrincipal \
+                        --role "$OPENAI_USER_ROLE_ID" \
+                        --scope "$AI_ACCOUNT_ID" >/dev/null
+                fi
+    predeploy:
+        windows:
+            shell: pwsh
+            run: |
+                $subscriptionId = azd env get-value AZURE_SUBSCRIPTION_ID 2>$null
+                if ($subscriptionId) {
+                    $tenantId = az account show --subscription $subscriptionId --query tenantId -o tsv 2>$null
+                } else {
+                    $tenantId = az account show --query tenantId -o tsv 2>$null
+                }
+                if ($tenantId) { azd env set AZURE_TENANT_ID $tenantId | Out-Null }
+        posix:
+            name: predeploy
+            kind: sh
+            shell: sh
+            run: |
+                SUBSCRIPTION_ID="$(azd env get-value AZURE_SUBSCRIPTION_ID 2>/dev/null || true)"
+                if [ -n "$SUBSCRIPTION_ID" ]; then
+                    TENANT_ID="$(az account show --subscription "$SUBSCRIPTION_ID" --query tenantId -o tsv 2>/dev/null || true)"
+                else
+                    TENANT_ID="$(az account show --query tenantId -o tsv 2>/dev/null || true)"
+                fi
+                [ -n "$TENANT_ID" ] && azd env set AZURE_TENANT_ID "$TENANT_ID" >/dev/null

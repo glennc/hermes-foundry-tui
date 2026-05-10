@@ -58,13 +58,36 @@ developer use. The signed-in user or group needs project-scoped Azure AI User
 permission on the Foundry project. Persist endpoint, agent name, and workspace
 configuration; do not persist bearer tokens.
 
+`az login` is required everywhere — including against the localhost dev stub —
+because the proxy derives the per-user workspace key from the Entra `oid`
+claim of the bearer it just acquired. If `DefaultAzureCredential` cannot
+produce a token, the proxy fails loudly with a "run az login" message before
+any RPC is attempted.
+
 Configuration to capture:
 
   AZURE_AI_PROJECT_ENDPOINT or HERMES_FOUNDRY_PROJECT_ENDPOINT
   HERMES_FOUNDRY_AGENT_NAME
-  HERMES_FOUNDRY_WORKSPACE_KEY
-  HERMES_FOUNDRY_USER_ISOLATION_KEY
-  HERMES_FOUNDRY_CHAT_ISOLATION_KEY
+  HERMES_FOUNDRY_WORKSPACE_KEY  (explicit override only — for tests, CI,
+                                 or deliberate impersonation. Normally the
+                                 workspace key is derived from the Entra
+                                 oid, hashed.)
+
+Workspace identity
+------------------
+One TUI user → one Foundry session → one persistent sandbox.
+
+The proxy decodes its own bearer token (no signature verify), reads the
+`oid` claim (Entra Object ID, falling back to `sub`), and uses
+`tui-{sha256(oid)[:16]}` as the `agent_session_id` for every Foundry
+Invocations call. The hash is stable per user, so the same user always
+reconnects to the same sandbox regardless of cwd or machine; different
+users always land in distinct sandboxes. The raw `oid` is never sent on
+the wire or written to logs.
+
+The hosted agent persists Hermes home under `$HOME/.hermes` so all Hermes
+state (config, sessions, memory, workspace files) lives on Foundry's
+session-scoped persistent disk.
 
 Initial JSON-RPC Scope
 ----------------------
@@ -137,10 +160,14 @@ Open Questions
 --------------
   - Should the backend seam be environment-only, e.g. HERMES_TUI_BACKEND=foundry,
     or exposed as a first-class CLI flag, e.g. hermes --tui --foundry?
-  - Should hosted TUI sessions have one shared workspace per user, per project,
-    or per local repo?
   - Which TUI slash commands should execute locally versus remotely?
   - How much local filesystem affordance should remain when the actual tools run
     in the hosted Foundry sandbox?
   - Should the event log be bounded or retained with the invocation record for
     debugging and reconnect?
+
+Resolved
+--------
+  - Hosted TUI sessions are scoped per user. Workspace key is derived from
+    the Entra `oid` claim (hashed) and is stable across cwds and machines.
+    See "Workspace identity" above.

@@ -6,10 +6,10 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import deque
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from azure.ai.agentserver.invocations import InvocationAgentServerHost
 from starlette.requests import Request
@@ -17,13 +17,102 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 
 app = InvocationAgentServerHost()
-_clarify_waiters: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Future[str]]] = {}
-_cancel_events: dict[str, asyncio.Event] = {}
 _GATEWAY_READY_TIMEOUT_S = 45.0
 _RPC_RESPONSE_TIMEOUT_S = 60.0
 _RPC_STREAM_IDLE_TIMEOUT_S = 15 * 60.0
-_RPC_STREAM_METHODS = frozenset({"prompt.submit"})
-_TERMINAL_EVENT_TYPES = frozenset({"error", "message.complete"})
+_DEFAULT_EVENT_BUFFER_SIZE = 1000
+_BUFFER_SHUTDOWN = object()
+_BUFFER_OVERFLOW = object()
+
+
+def _event_buffer_capacity() -> int:
+    raw = (os.environ.get("HERMES_FOUNDRY_EVENT_BUFFER_SIZE") or "").strip()
+    if not raw:
+        return _DEFAULT_EVENT_BUFFER_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_EVENT_BUFFER_SIZE
+    return value if value > 0 else _DEFAULT_EVENT_BUFFER_SIZE
+
+
+class _EventBuffer:
+    """Per-session ring buffer with monotonic seq and live subscribers.
+
+    The buffer is the source of truth for every event emitted by the hosted
+    Hermes gateway for a given session_id. Events are stamped with a seq
+    before fan-out so subscribers can resume after a transport blip via
+    `since_seq` cursors. Bounded retention drops the oldest event when
+    `capacity` is exceeded; `last_dropped_seq` lets new subscribers detect
+    a replay gap.
+    """
+
+    __slots__ = ("events", "next_seq", "last_dropped_seq", "subscribers")
+
+    def __init__(self, capacity: int) -> None:
+        self.events: deque[tuple[int, dict[str, Any]]] = deque(maxlen=capacity)
+        self.next_seq: int = 0
+        self.last_dropped_seq: int = -1
+        self.subscribers: list[asyncio.Queue[Any]] = []
+
+    def append(self, frame: dict[str, Any]) -> int:
+        seq = self.next_seq
+        self.next_seq = seq + 1
+        params = frame.get("params")
+        if isinstance(params, dict):
+            params["seq"] = seq
+        maxlen = self.events.maxlen
+        if maxlen is not None and len(self.events) == maxlen:
+            dropped_seq, _ = self.events[0]
+            if dropped_seq > self.last_dropped_seq:
+                self.last_dropped_seq = dropped_seq
+        self.events.append((seq, frame))
+        stale: list[asyncio.Queue[Any]] = []
+        for q in list(self.subscribers):
+            try:
+                q.put_nowait(frame)
+            except asyncio.QueueFull:
+                stale.append(q)
+        for q in stale:
+            self.close_subscription(q)
+            self._signal_queue(q, _BUFFER_OVERFLOW)
+        return seq
+
+    def open_subscription(
+        self, since_seq: int
+    ) -> tuple[list[dict[str, Any]], int, asyncio.Queue[Any]]:
+        replay = [frame for seq, frame in self.events if seq > since_seq]
+        queue_maxsize = max(1, self.events.maxlen or 1)
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=queue_maxsize)
+        self.subscribers.append(queue)
+        return replay, self.last_dropped_seq, queue
+
+    def close_subscription(self, queue: asyncio.Queue[Any]) -> None:
+        try:
+            self.subscribers.remove(queue)
+        except ValueError:
+            pass
+
+    def shutdown(self) -> None:
+        for q in self.subscribers:
+            self._signal_queue(q, _BUFFER_SHUTDOWN)
+        self.subscribers.clear()
+
+    @staticmethod
+    def _signal_queue(queue: asyncio.Queue[Any], item: object) -> None:
+        try:
+            queue.put_nowait(item)
+            return
+        except asyncio.QueueFull:
+            pass
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
 
 
 def _jsonrpc_error(rid: Any, code: int, message: str) -> dict[str, Any]:
@@ -32,33 +121,6 @@ def _jsonrpc_error(rid: Any, code: int, message: str) -> dict[str, Any]:
 
 def _sse_frame(value: dict[str, Any]) -> str:
     return f"data: {json.dumps(value, ensure_ascii=False)}\n\n"
-
-
-def _extract_text(payload: Any) -> str:
-    if isinstance(payload, str):
-        return payload.strip()
-    if not isinstance(payload, dict):
-        return ""
-
-    for key in ("message", "input", "text"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    nested = payload.get("input")
-    if isinstance(nested, dict):
-        value = nested.get("text") or nested.get("message")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    return ""
-
-
-def _event_frame(event_type: str, payload: dict[str, Any] | None = None) -> str:
-    body: dict[str, Any] = {"type": event_type}
-    if payload is not None:
-        body["payload"] = payload
-    return _sse_frame(body)
 
 
 def _first_env(*names: str) -> str:
@@ -88,6 +150,7 @@ def _foundry_child_model_config() -> dict[str, Any] | None:
     deployment_name = _first_env(
         "HERMES_FOUNDRY_MODEL_DEPLOYMENT_NAME",
         "AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME",
+        "AZURE_AI_MODEL_DEPLOYMENT_NAME",
         "AZURE_OPENAI_DEPLOYMENT_NAME",
         "AZURE_OPENAI_DEPLOYMENT",
     )
@@ -127,6 +190,9 @@ def _default_child_hermes_home() -> Path:
     configured = _first_env("HERMES_CHILD_HOME", "HERMES_GATEWAY_HOME")
     if configured:
         return Path(configured).expanduser()
+
+    if os.environ.get("FOUNDRY_HOSTING_ENVIRONMENT", "").strip():
+        return Path.home() / ".hermes"
 
     cache_root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     return cache_root / "hermes-foundry-tui" / "hermes-home"
@@ -252,12 +318,17 @@ class HermesChildBroker:
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._pending: dict[Any, asyncio.Future[dict[str, Any]]] = {}
-        self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self._buffers: dict[str, _EventBuffer] = {}
         self._ready: asyncio.Future[None] | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
 
-    async def request(self, rpc_request: dict[str, Any], *, timeout: float = _RPC_RESPONSE_TIMEOUT_S) -> dict[str, Any]:
+    async def request(
+        self,
+        rpc_request: dict[str, Any],
+        *,
+        timeout: float = _RPC_RESPONSE_TIMEOUT_S,
+    ) -> dict[str, Any]:
         await self._ensure_started()
         rid = rpc_request.get("id")
         if rid is None:
@@ -273,43 +344,81 @@ class HermesChildBroker:
         finally:
             self._pending.pop(rid, None)
 
-    async def stream_request(self, rpc_request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
-        params = rpc_request.get("params")
-        session_id = str(params.get("session_id") or "") if isinstance(params, dict) else ""
+    async def subscribe(
+        self, session_id: str, since_seq: int = -1
+    ) -> AsyncIterator[dict[str, Any]]:
         if not session_id:
-            yield _jsonrpc_error(rpc_request.get("id"), -32602, "session_id is required for streaming RPC")
+            yield _jsonrpc_error(None, -32602, "session_id is required to subscribe to events")
             return
 
         await self._ensure_started()
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        previous = self._streams.get(session_id)
-        self._streams[session_id] = queue
-        try:
-            response = await self.request(rpc_request)
-            yield response
-            if response.get("error"):
-                return
 
-            while True:
-                frame = await asyncio.wait_for(queue.get(), timeout=_RPC_STREAM_IDLE_TIMEOUT_S)
+        buf = self._buffers.get(session_id)
+        if buf is None:
+            buf = _EventBuffer(_event_buffer_capacity())
+            self._buffers[session_id] = buf
+
+        replay, last_dropped, queue = buf.open_subscription(since_seq)
+        try:
+            if since_seq < last_dropped:
+                yield {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "replay.gap",
+                        "session_id": session_id,
+                        "seq": last_dropped,
+                        "payload": {"missed_through": last_dropped},
+                    },
+                }
+            for frame in replay:
                 yield frame
-                if _frame_event_type(frame) in _TERMINAL_EVENT_TYPES:
+            while True:
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(), timeout=_RPC_STREAM_IDLE_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    yield {
+                        "jsonrpc": "2.0",
+                        "method": "event",
+                        "params": {
+                            "type": "error",
+                            "session_id": session_id,
+                            "payload": {"message": "Hermes gateway stream timed out."},
+                        },
+                    }
                     return
-        except asyncio.TimeoutError:
-            yield {
-                "jsonrpc": "2.0",
-                "method": "event",
-                "params": {
-                    "type": "error",
-                    "session_id": session_id,
-                    "payload": {"message": "Hermes gateway stream timed out."},
-                },
-            }
+                if item is _BUFFER_SHUTDOWN:
+                    yield {
+                        "jsonrpc": "2.0",
+                        "method": "event",
+                        "params": {
+                            "type": "error",
+                            "session_id": session_id,
+                            "payload": {"message": "Hermes gateway restarted."},
+                        },
+                    }
+                    return
+                if item is _BUFFER_OVERFLOW:
+                    yield {
+                        "jsonrpc": "2.0",
+                        "method": "event",
+                        "params": {
+                            "type": "error",
+                            "session_id": session_id,
+                            "payload": {
+                                "message": (
+                                    "Hermes gateway event stream fell behind; "
+                                    "reconnect to resume from the last received seq."
+                                )
+                            },
+                        },
+                    }
+                    return
+                yield item
         finally:
-            if previous is not None:
-                self._streams[session_id] = previous
-            elif self._streams.get(session_id) is queue:
-                self._streams.pop(session_id, None)
+            buf.close_subscription(queue)
 
     async def _ensure_started(self) -> None:
         if self._proc is not None and self._proc.returncode is None:
@@ -337,18 +446,9 @@ class HermesChildBroker:
             )
 
             self._pending.clear()
-            for queue in self._streams.values():
-                queue.put_nowait(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "event",
-                        "params": {
-                            "type": "error",
-                            "payload": {"message": "Hermes gateway restarted."},
-                        },
-                    }
-                )
-            self._streams.clear()
+            for buf in self._buffers.values():
+                buf.shutdown()
+            self._buffers.clear()
 
             loop = asyncio.get_running_loop()
             self._ready = loop.create_future()
@@ -435,8 +535,14 @@ class HermesChildBroker:
             return
 
         session_id = _frame_session_id(frame)
-        if session_id and session_id in self._streams:
-            await self._streams[session_id].put(frame)
+        if not session_id:
+            return
+
+        buf = self._buffers.get(session_id)
+        if buf is None:
+            buf = _EventBuffer(_event_buffer_capacity())
+            self._buffers[session_id] = buf
+        buf.append(frame)
 
     async def _fail_all(self, exc: Exception) -> None:
         if self._ready is not None and not self._ready.done():
@@ -447,18 +553,9 @@ class HermesChildBroker:
                 future.set_exception(exc)
         self._pending.clear()
 
-        for session_id, queue in list(self._streams.items()):
-            queue.put_nowait(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "event",
-                    "params": {
-                        "type": "error",
-                        "session_id": session_id,
-                        "payload": {"message": str(exc)},
-                    },
-                }
-            )
+        for buf in list(self._buffers.values()):
+            buf.shutdown()
+        self._buffers.clear()
 
     async def _stop_child(self) -> None:
         proc = self._proc
@@ -477,48 +574,6 @@ class HermesChildBroker:
 _broker = HermesChildBroker()
 
 
-async def _handle_control(payload: dict[str, Any]):
-    control = payload.get("control")
-    if not isinstance(control, dict):
-        return JSONResponse(
-            {"error": "invalid_request", "message": "control payload is required."},
-            status_code=400,
-        )
-
-    control_type = str(control.get("type") or "").strip()
-    if control_type == "clarify.respond":
-        request_id = str(control.get("request_id") or "").strip()
-        answer = str(control.get("answer") or "")
-        waiter = _clarify_waiters.get(request_id)
-        if not waiter:
-            return JSONResponse(
-                {"status": "not_found", "request_id": request_id},
-                status_code=404,
-            )
-        loop, future = waiter
-        if not future.done():
-            loop.call_soon_threadsafe(future.set_result, answer)
-        return JSONResponse({"status": "ok", "request_id": request_id})
-
-    if control_type == "cancel":
-        invocation_id = str(control.get("invocation_id") or "").strip()
-        cancelled = False
-        if invocation_id and (event := _cancel_events.get(invocation_id)):
-            event.set()
-            cancelled = True
-        return JSONResponse(
-            {
-                "status": "cancelled" if cancelled else "not_found",
-                "invocation_id": invocation_id,
-            }
-        )
-
-    return JSONResponse(
-        {"error": "unsupported_control", "message": f"Unsupported control type: {control_type}"},
-        status_code=400,
-    )
-
-
 async def _handle_rpc(payload: dict[str, Any]):
     rpc_request = payload.get("request")
     if not isinstance(rpc_request, dict):
@@ -528,19 +583,43 @@ async def _handle_rpc(payload: dict[str, Any]):
         )
 
     method = str(rpc_request.get("method") or "")
-    if method in _RPC_STREAM_METHODS:
-        async def frames() -> AsyncIterator[str]:
+
+    if method == "session.events":
+        rid = rpc_request.get("id")
+        params = rpc_request.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        session_id = str(params.get("session_id") or "")
+        raw_since = params.get("since_seq")
+        try:
+            since_seq = int(raw_since) if raw_since is not None else -1
+        except (TypeError, ValueError):
+            since_seq = -1
+
+        async def event_frames() -> AsyncIterator[str]:
+            if not session_id:
+                yield _sse_frame(_jsonrpc_error(rid, -32602, "session_id is required for session.events"))
+                yield _sse_frame({"type": "done"})
+                return
+
+            yield _sse_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {
+                        "status": "subscribed",
+                        "session_id": session_id,
+                        "since_seq": since_seq,
+                    },
+                }
+            )
             try:
-                async for frame in _broker.stream_request(rpc_request):
+                async for frame in _broker.subscribe(session_id, since_seq):
                     yield _sse_frame(frame)
                 yield _sse_frame({"type": "done"})
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                session_id = ""
-                params = rpc_request.get("params")
-                if isinstance(params, dict):
-                    session_id = str(params.get("session_id") or "")
                 yield _sse_frame(
                     {
                         "jsonrpc": "2.0",
@@ -555,7 +634,7 @@ async def _handle_rpc(payload: dict[str, Any]):
                 yield _sse_frame({"type": "done"})
 
         return StreamingResponse(
-            frames(),
+            event_frames(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
@@ -565,26 +644,6 @@ async def _handle_rpc(payload: dict[str, Any]):
     except Exception as exc:
         response = _jsonrpc_error(rpc_request.get("id"), 5000, str(exc))
     return JSONResponse(response)
-
-
-async def _wait_for_clarify_answer(request_id: str, cancel_event: asyncio.Event) -> str | None:
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[str] = loop.create_future()
-    _clarify_waiters[request_id] = (loop, future)
-    cancel_task = asyncio.create_task(cancel_event.wait())
-    try:
-        done, _ = await asyncio.wait(
-            {future, cancel_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if cancel_task in done:
-            if not future.done():
-                future.cancel()
-            return None
-        cancel_task.cancel()
-        return future.result()
-    finally:
-        _clarify_waiters.pop(request_id, None)
 
 
 @app.invoke_handler
@@ -604,111 +663,12 @@ async def handle_invoke(request: Request):
     if isinstance(payload, dict) and payload.get("kind") == "hermes.rpc":
         return await _handle_rpc(payload)
 
-    if isinstance(payload, dict) and payload.get("kind") == "hermes.control":
-        return await _handle_control(payload)
-
-    text = _extract_text(payload)
-    if not text:
-        return JSONResponse(
-            {
-                "error": "invalid_request",
-                "message": 'Send text directly or JSON with "message", "input", or "text".',
-            },
-            status_code=400,
-        )
-
-    session_payload = payload.get("session") if isinstance(payload, dict) else None
-    session_id = (
-        session_payload.get("workspace")
-        if isinstance(session_payload, dict) and session_payload.get("workspace")
-        else getattr(request.state, "session_id", "local")
-    )
-    invocation_id = (
-        str(payload.get("invocation_id"))
-        if isinstance(payload, dict) and payload.get("invocation_id")
-        else getattr(request.state, "invocation_id", "local")
-    )
-    cancel_event = asyncio.Event()
-    _cancel_events[invocation_id] = cancel_event
-
-    response_text = (
-        "Foundry local Hermes stub received your prompt:\n\n"
-        f"> {text}\n\n"
-        "This proves the Hermes TUI can route a turn through the local "
-        "Azure AI Foundry Invocations host and render TUI-shaped events."
-    )
-
-    async def events() -> AsyncIterator[str]:
-        try:
-            yield _event_frame(
-                "status.update",
-                {
-                    "kind": "info",
-                    "text": f"Accepted Hermes invocation {invocation_id} for session {session_id}.",
-                },
-            )
-            yield _event_frame("message.start", {})
-
-            final_text = response_text
-            if "clarify" in text.lower():
-                request_id = f"clarify-{uuid4().hex[:8]}"
-                yield _event_frame(
-                    "clarify.request",
-                    {
-                        "request_id": request_id,
-                        "question": "Which Foundry TUI control path should the stub demonstrate?",
-                        "choices": ["session routing", "interrupt handling", "approval-style controls"],
-                    },
-                )
-                answer = await _wait_for_clarify_answer(request_id, cancel_event)
-                if answer is None or cancel_event.is_set():
-                    yield _event_frame("done")
-                    return
-                yield _event_frame(
-                    "status.update",
-                    {
-                        "kind": "info",
-                        "text": f"Received clarification: {answer}",
-                    },
-                )
-                final_text = (
-                    "Foundry local Hermes stub received your clarification:\n\n"
-                    f"> {answer}\n\n"
-                    "The TUI displayed a clarify prompt, sent hermes.control back "
-                    "through the proxy, and the same invocation continued."
-                )
-
-            for chunk in final_text.split(" "):
-                if cancel_event.is_set():
-                    yield _event_frame("done")
-                    return
-                yield _event_frame("message.delta", {"text": chunk + " "})
-                await asyncio.sleep(0.08 if "slow" in text.lower() else 0.03)
-
-            yield _event_frame(
-                "message.complete",
-                {
-                    "status": "complete",
-                    "text": final_text,
-                    "usage": {
-                        "calls": 1,
-                        "input": len(text.split()),
-                        "output": len(final_text.split()),
-                        "total": len(text.split()) + len(final_text.split()),
-                    },
-                },
-            )
-            yield _event_frame("done")
-        except asyncio.CancelledError:
-            cancel_event.set()
-            raise
-        finally:
-            _cancel_events.pop(invocation_id, None)
-
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+    return JSONResponse(
+        {
+            "error": "unsupported_payload",
+            "message": 'This agent only accepts Hermes RPC payloads: {"kind":"hermes.rpc","request":{...}}.',
+        },
+        status_code=400,
     )
 
 

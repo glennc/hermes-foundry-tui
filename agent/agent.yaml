@@ -4,6 +4,13 @@ name: hermes-foundry-agent
 protocols:
   - protocol: invocations
     version: 1.0.0
+environment_variables:
+  - name: HERMES_FOUNDRY_MODEL_DEPLOYMENT_NAME
+    value: ${AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME}
+  - name: HERMES_FOUNDRY_BASE_URL
+    value: ${AZURE_FOUNDRY_BASE_URL}
+  - name: HERMES_FOUNDRY_MODEL_API_MODE
+    value: ${AZURE_FOUNDRY_MODEL_API_MODE}
 resources:
   cpu: "0.25"
   memory: 0.5Gi
