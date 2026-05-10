@@ -62,6 +62,37 @@ param aiFoundryProjectName string = 'ai-project-${environmentName}'
 @description('List of model deployments')
 param aiProjectDeploymentsJson string = '[]'
 
+@description('Default Foundry model deployment name to provision when aiProjectDeploymentsJson is empty.')
+param foundryModelDeploymentName string = 'gpt-4.1-mini'
+
+@description('Default Foundry model name to provision when aiProjectDeploymentsJson is empty.')
+param foundryModelName string = 'gpt-4.1-mini'
+
+@description('Default Foundry model version to provision when aiProjectDeploymentsJson is empty.')
+param foundryModelVersion string = '2025-04-14'
+
+@description('Default Foundry model deployment SKU name.')
+param foundryModelSkuName string = 'GlobalStandard'
+
+@description('Default Foundry model deployment SKU capacity.')
+param foundryModelSkuCapacity int = 1
+
+@description('Hermes API mode for the provisioned Foundry model.')
+@allowed([
+  'chat_completions'
+  'codex_responses'
+  'anthropic_messages'
+])
+param foundryModelApiMode string = 'chat_completions'
+
+@description('Hermes auth mode for the provisioned Foundry model.')
+@allowed([
+  'auto'
+  'default_azure_credential'
+  'api_key'
+])
+param foundryModelAuthMode string = 'default_azure_credential'
+
 @description('List of connections')
 param aiProjectConnectionsJson string = '[]'
 
@@ -72,10 +103,37 @@ param aiProjectConnectionCredentialsJson string = '{}'
 @description('List of resources to create and connect to the AI project')
 param aiProjectDependentResourcesJson string = '[]'
 
-var aiProjectDeployments = json(aiProjectDeploymentsJson)
+var configuredAiProjectDeployments = json(aiProjectDeploymentsJson)
+var defaultAiProjectDeployments = [
+  {
+    name: foundryModelDeploymentName
+    model: {
+      name: foundryModelName
+      format: 'OpenAI'
+      version: foundryModelVersion
+    }
+    sku: {
+      name: foundryModelSkuName
+      capacity: foundryModelSkuCapacity
+    }
+  }
+]
+var aiProjectDeployments = empty(configuredAiProjectDeployments) ? defaultAiProjectDeployments : configuredAiProjectDeployments
 var aiProjectConnections = json(aiProjectConnectionsJson)
 var aiProjectConnectionCreds = json(aiProjectConnectionCredentialsJson)
 var aiProjectDependentResources = json(aiProjectDependentResourcesJson)
+var selectedFoundryModelDeployment = empty(aiProjectDeployments) ? {
+  name: ''
+  model: {
+    name: ''
+    format: ''
+    version: ''
+  }
+  sku: {
+    name: ''
+    capacity: 0
+  }
+} : aiProjectDeployments[0]
 
 @description('Enable hosted agent deployment')
 param enableHostedAgents bool
@@ -206,6 +264,11 @@ output AZURE_AI_PROJECT_NAME string = useExistingAiProject ? existingAiProject.o
 // Endpoints
 output AZURE_AI_PROJECT_ENDPOINT string = useExistingAiProject ? existingAiProject.outputs.AZURE_AI_PROJECT_ENDPOINT : aiProject.outputs.AZURE_AI_PROJECT_ENDPOINT
 output AZURE_OPENAI_ENDPOINT string = useExistingAiProject ? existingAiProject.outputs.AZURE_OPENAI_ENDPOINT : aiProject.outputs.AZURE_OPENAI_ENDPOINT
+output AZURE_FOUNDRY_BASE_URL string = useExistingAiProject ? existingAiProject.outputs.AZURE_OPENAI_ENDPOINT : aiProject.outputs.AZURE_OPENAI_ENDPOINT
+output AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME string = selectedFoundryModelDeployment.name
+output AZURE_FOUNDRY_MODEL_NAME string = selectedFoundryModelDeployment.model.name
+output AZURE_FOUNDRY_MODEL_API_MODE string = foundryModelApiMode
+output AZURE_FOUNDRY_AUTH_MODE string = foundryModelAuthMode
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = useExistingAiProject ? existingAiProject.outputs.APPLICATIONINSIGHTS_CONNECTION_STRING : aiProject.outputs.APPLICATIONINSIGHTS_CONNECTION_STRING
 output APPLICATIONINSIGHTS_RESOURCE_ID string = useExistingAiProject ? existingAiProject.outputs.APPLICATIONINSIGHTS_RESOURCE_ID : aiProject.outputs.APPLICATIONINSIGHTS_RESOURCE_ID
 
