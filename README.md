@@ -50,16 +50,16 @@ azd ai agent invoke --local --protocol invocations -f /tmp/hermes-rpc-setup.json
 
 The local agent starts on port `8088` by default. Invocations now accept only the `hermes.rpc` protocol used by the TUI path; direct text invokes are intentionally rejected so they do not mask real Hermes behavior.
 
-`azd provision` creates the Foundry project and a default OpenAI-family model deployment for the dev loop. The default deployment is `gpt-4.1-mini` with `auth_mode=default_azure_credential`, so local runs use your Azure developer identity and hosted runs use the agent identity instead of API keys.
+`azd provision` creates the Foundry project and a default OpenAI-family model deployment for the dev loop. The default deployment is `gpt-5.4-mini` with `auth_mode=default_azure_credential`, so local runs use your Azure developer identity and hosted runs use the agent identity instead of API keys.
 
 Override the model with azd environment values before provisioning:
 
 ```bash
-azd env set AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME gpt-4.1-mini
-azd env set AZURE_FOUNDRY_MODEL_NAME gpt-4.1-mini
-azd env set AZURE_FOUNDRY_MODEL_VERSION 2025-04-14
-azd env set AZURE_FOUNDRY_MODEL_SKU_NAME GlobalStandard
-azd env set AZURE_FOUNDRY_MODEL_SKU_CAPACITY 1
+azd env set AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME gpt-5.4-mini
+azd env set AZURE_FOUNDRY_MODEL_NAME gpt-5.4-mini
+azd env set AZURE_FOUNDRY_MODEL_VERSION 2026-03-17
+azd env set AZURE_FOUNDRY_MODEL_SKU_NAME DataZoneStandard
+azd env set AZURE_FOUNDRY_MODEL_SKU_CAPACITY 10
 azd env set AZURE_FOUNDRY_MODEL_API_MODE chat_completions
 azd env set AZURE_FOUNDRY_AUTH_MODE default_azure_credential
 ```
@@ -119,7 +119,7 @@ If `DefaultAzureCredential` cannot produce a token (no `az login`, no service pr
 
 ### Persistent disk per session
 
-The new public-preview Foundry hosted-agent runtime gives every distinct `agent_session_id` its own sandbox **and** its own persistent `$HOME` that lives for the life of the session. The hosted agent therefore writes Hermes home to `$HOME/.hermes` (selected automatically when `FOUNDRY_HOSTING_ENVIRONMENT` is set) so all Hermes state — config, sessions, memory, workspace files — lands on Foundry's per-session persistent disk and survives across invocations and process restarts within the session. Local dev (without `FOUNDRY_HOSTING_ENVIRONMENT`) still defaults Hermes home to `~/.cache/hermes-foundry-tui/hermes-home` so it doesn't trample a developer's real `~/.hermes`.
+The new public-preview Foundry hosted-agent runtime gives every distinct `agent_session_id` its own sandbox **and** its own persistent `$HOME` that lives for the life of the session. The hosted agent therefore writes Hermes home to `$HOME/.hermes` (selected automatically when `FOUNDRY_HOSTING_ENVIRONMENT` is set) and runs the Hermes child from `$HOME/workspace`, so both Hermes state and agent-created workspace files land on Foundry's per-session persistent disk and survive across invocations and process restarts within the session. Local dev (without `FOUNDRY_HOSTING_ENVIRONMENT`) still defaults Hermes home to `~/.cache/hermes-foundry-tui/hermes-home` and cwd to the repo root so it doesn't trample a developer's real `~/.hermes`.
 
 ### Foundry child config
 
@@ -167,4 +167,23 @@ azd up
 
 ## Current status
 
-The agent accepts the `hermes.rpc` tunnel used by the TUI path; direct text Invocations payloads are rejected. Per-user session isolation lands the workspace key on the Entra `oid` (hashed), Hermes home on Foundry's session-scoped persistent `$HOME`, and the deployed image now includes the pinned Hermes runtime. Durable event logs and reconnect cursors are later hardening steps.
+The agent accepts the `hermes.rpc` tunnel used by the TUI path; direct text Invocations payloads are rejected. Per-user session isolation lands the workspace key on the Entra `oid` (hashed), Hermes home and the runtime cwd on Foundry's session-scoped persistent `$HOME`, and the deployed image now includes the pinned Hermes runtime. Durable event logs and reconnect cursors are later hardening steps.
+
+## What runs where
+
+The hosted Foundry sandbox is your **persistent remote workspace** — full filesystem and shell, scoped to your Entra identity. The local TUI is just a renderer + a thin proxy. That changes what "the shell" means compared to local Hermes:
+
+| Surface | Where it runs | Notes |
+|---|---|---|
+| `shell.exec`, agent terminal tools, file edits, `/cd` | **Foundry sandbox** | tools start in persistent `$HOME/workspace` — `ls` shows the sandbox, not your laptop |
+| Path completion (`complete.path`) | Foundry sandbox | matches paths the agent will actually use |
+| Slash commands, `/help`, `/skills`, `/cron`, `/model` | Foundry sandbox | full Hermes catalog |
+| Hermes session state (history, memory, skills) | Foundry sandbox `$HOME/.hermes` | persistent across reconnects |
+| Clipboard image paste (`Ctrl+V`) | Local read at the proxy, **bytes uploaded** to the sandbox `$HOME/.hermes/images/` | works the natural way |
+| Drag-drop a local file (`input.detect_drop`) | Local detection at the proxy | image files have their bytes uploaded to the sandbox; non-image files generate a `[User attached file: …]` marker that goes into the prompt text |
+| `image.attach <path>` | Proxy resolves the path locally first; if it exists on your laptop, bytes are uploaded. Otherwise the path is treated as sandbox-relative | covers both local-laptop attachments and references to files already in the sandbox |
+| Voice (`voice.{toggle,record,tts}`) | Not yet supported in foundry mode | local mic/speaker plumbing isn't wired up; voice RPCs currently surface upstream errors |
+| TUI rendering, Ink keybindings, composer | Local | every TUI redraw and keystroke is local |
+
+The wire change that enables clipboard / image bytes upload is an optional `bytes_b64` + `filename` on the hosted `image.attach` RPC. Local Hermes ignores it; foundry mode uses it.
+

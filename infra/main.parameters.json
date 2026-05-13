@@ -30,19 +30,19 @@
         "value": "${AI_PROJECT_DEPLOYMENTS=[]}"
       },
       "foundryModelDeploymentName": {
-        "value": "${AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME=gpt-4.1-mini}"
+        "value": "${AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME=gpt-5.4-mini}"
       },
       "foundryModelName": {
-        "value": "${AZURE_FOUNDRY_MODEL_NAME=gpt-4.1-mini}"
+        "value": "${AZURE_FOUNDRY_MODEL_NAME=gpt-5.4-mini}"
       },
       "foundryModelVersion": {
-        "value": "${AZURE_FOUNDRY_MODEL_VERSION=2025-04-14}"
+        "value": "${AZURE_FOUNDRY_MODEL_VERSION=2026-03-17}"
       },
       "foundryModelSkuName": {
-        "value": "${AZURE_FOUNDRY_MODEL_SKU_NAME=GlobalStandard}"
+        "value": "${AZURE_FOUNDRY_MODEL_SKU_NAME=DataZoneStandard}"
       },
       "foundryModelSkuCapacity": {
-        "value": "${AZURE_FOUNDRY_MODEL_SKU_CAPACITY=1}"
+        "value": "${AZURE_FOUNDRY_MODEL_SKU_CAPACITY=10}"
       },
       "foundryModelApiMode": {
         "value": "${AZURE_FOUNDRY_MODEL_API_MODE=chat_completions}"

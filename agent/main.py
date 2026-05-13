@@ -186,12 +186,16 @@ def _foundry_child_model_config() -> dict[str, Any] | None:
     }
 
 
+def _is_foundry_hosted() -> bool:
+    return bool(os.environ.get("FOUNDRY_HOSTING_ENVIRONMENT", "").strip())
+
+
 def _default_child_hermes_home() -> Path:
     configured = _first_env("HERMES_CHILD_HOME", "HERMES_GATEWAY_HOME")
     if configured:
         return Path(configured).expanduser()
 
-    if os.environ.get("FOUNDRY_HOSTING_ENVIRONMENT", "").strip():
+    if _is_foundry_hosted():
         return Path.home() / ".hermes"
 
     cache_root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
@@ -291,6 +295,10 @@ def _default_gateway_cwd(hermes_root: Path) -> Path:
     configured = (os.environ.get("HERMES_GATEWAY_CWD") or os.environ.get("HERMES_CWD") or "").strip()
     if configured:
         return Path(configured).expanduser()
+    if _is_foundry_hosted():
+        workspace = Path.home() / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        return workspace
     if hermes_root.parent.name == "third_party":
         return hermes_root.parent.parent
     return Path.cwd()

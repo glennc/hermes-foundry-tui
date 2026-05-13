@@ -12,5 +12,5 @@ environment_variables:
   - name: HERMES_FOUNDRY_MODEL_API_MODE
     value: ${AZURE_FOUNDRY_MODEL_API_MODE}
 resources:
-  cpu: "0.25"
-  memory: 0.5Gi
+  cpu: "1"
+  memory: 1Gi
