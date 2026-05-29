@@ -18,6 +18,10 @@ from azure.ai.agentserver.invocations import InvocationAgentServerHost
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
+import routine_provisioner
+import telemetry
+
+telemetry.ensure_connection_string_env()
 
 app = InvocationAgentServerHost()
 _GATEWAY_READY_TIMEOUT_S = 45.0
@@ -782,16 +786,16 @@ async def _handle_maintenance(payload: dict[str, Any]):
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     if not _maintenance_process_lock.acquire(blocking=False):
-        return JSONResponse(
-            {
-                "kind": "hermes.maintenance.result",
-                "run_id": run_id,
-                "status": "skipped",
-                "reason": "already_running",
-                "started_at": started_at,
-                "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-        )
+        skipped = {
+            "kind": "hermes.maintenance.result",
+            "run_id": run_id,
+            "status": "skipped",
+            "reason": "already_running",
+            "started_at": started_at,
+            "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        telemetry.record_maintenance(skipped)
+        return JSONResponse(skipped)
 
     try:
         hermes_home = _prepare_child_hermes_home()
@@ -844,19 +848,19 @@ async def _handle_maintenance(payload: dict[str, Any]):
             if seq is not None:
                 result["event_seq"] = seq
 
+        telemetry.record_maintenance(result)
         return JSONResponse(result)
     except Exception as exc:
-        return JSONResponse(
-            {
-                "kind": "hermes.maintenance.result",
-                "run_id": run_id,
-                "status": "error",
-                "started_at": started_at,
-                "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "error": str(exc),
-            },
-            status_code=500,
-        )
+        errored = {
+            "kind": "hermes.maintenance.result",
+            "run_id": run_id,
+            "status": "error",
+            "started_at": started_at,
+            "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "error": str(exc),
+        }
+        telemetry.record_maintenance(errored)
+        return JSONResponse(errored, status_code=500)
     finally:
         _maintenance_process_lock.release()
 
@@ -930,10 +934,16 @@ async def handle_invoke(request: Request):
 
     payload = _normalize_invoke_payload(payload)
 
+    invocation_session_id = str(getattr(request.state, "session_id", "") or "").strip()
+
     if isinstance(payload, dict):
         if payload.get("kind") == "hermes.rpc":
+            if invocation_session_id:
+                routine_provisioner.schedule_maintenance_routine(invocation_session_id)
             return await _handle_rpc(payload)
         if payload.get("kind") == "hermes.maintenance":
+            if invocation_session_id and not _payload_session_id(payload):
+                payload["session_id"] = invocation_session_id
             return await _handle_maintenance(payload)
 
     return JSONResponse(

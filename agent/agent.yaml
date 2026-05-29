@@ -10,3 +10,19 @@ agentEndpoint:
 resources:
   cpu: "1"
   memory: 1Gi
+environmentVariables:
+  # APPLICATIONINSIGHTS_CONNECTION_STRING itself is a reserved hosted-agent
+  # variable (setting it here fails create_version with HTTP 400). The runtime
+  # auto-injects it, but pointing at a platform-managed Application Insights we
+  # cannot query. We pass the connection string for our own provisioned
+  # resource under a non-reserved alias; telemetry.ensure_connection_string_env
+  # copies it onto the canonical name (overriding the platform value) so
+  # telemetry lands in the resource we own. azd substitutes ${...} from the azd
+  # env (APPLICATIONINSIGHTS_CONNECTION_STRING is a top-level infra output).
+  - name: APPLICATION_INSIGHTS_CONNECTION_STRING
+    value: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
+  # Project endpoint used by routine_provisioner to self-provision the per-session
+  # maintenance routine via the routines REST API. Passed under a non-reserved
+  # name so it is guaranteed present regardless of platform auto-injection.
+  - name: HERMES_FOUNDRY_PROJECT_ENDPOINT
+    value: ${AZURE_AI_PROJECT_ENDPOINT}

@@ -113,6 +113,62 @@ hooks:
                 fi
                 [ -n "$TENANT_ID" ] && azd env set AZURE_TENANT_ID "$TENANT_ID" >/dev/null
                 sh ./scripts/render-hermes-config.sh
+    predown:
+        windows:
+            shell: pwsh
+            run: |
+                $envName = azd env get-value AZURE_ENV_NAME 2>$null
+                $sub = azd env get-value AZURE_SUBSCRIPTION_ID 2>$null
+                if (-not $envName) {
+                    Write-Host "predown: AZURE_ENV_NAME not set; skipping model deployment cleanup."
+                    return
+                }
+                $subArgs = @()
+                if ($sub) { $subArgs = @('--subscription', $sub) }
+                $accounts = az cognitiveservices account list @subArgs --query "[?tags.\`"azd-env-name\`"=='$envName'].[name,resourceGroup]" -o tsv 2>$null
+                if (-not $accounts) {
+                    Write-Host "predown: no Cognitive Services accounts tagged azd-env-name=$envName; nothing to clean."
+                    return
+                }
+                foreach ($line in $accounts) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $parts = $line -split "`t"
+                    $account = $parts[0]; $rg = $parts[1]
+                    $deployments = az cognitiveservices account deployment list -n $account -g $rg @subArgs --query "[].name" -o tsv 2>$null
+                    foreach ($dep in $deployments) {
+                        if ([string]::IsNullOrWhiteSpace($dep)) { continue }
+                        Write-Host "predown: deleting model deployment '$dep' on $account ($rg)"
+                        az cognitiveservices account deployment delete -n $account -g $rg --deployment-name $dep @subArgs
+                        if ($LASTEXITCODE -ne 0) { Write-Host "predown: warning: failed to delete deployment '$dep' (continuing)" }
+                    }
+                }
+        posix:
+            name: predown
+            kind: sh
+            shell: sh
+            run: |
+                ENVNAME="$(azd env get-value AZURE_ENV_NAME 2>/dev/null || true)"
+                SUB="$(azd env get-value AZURE_SUBSCRIPTION_ID 2>/dev/null || true)"
+                if [ -z "$ENVNAME" ]; then
+                    echo "predown: AZURE_ENV_NAME not set; skipping model deployment cleanup."
+                    exit 0
+                fi
+                SUB_ARGS=""
+                [ -n "$SUB" ] && SUB_ARGS="--subscription $SUB"
+                ACCOUNTS="$(az cognitiveservices account list $SUB_ARGS --query "[?tags.\"azd-env-name\"=='$ENVNAME'].[name,resourceGroup]" -o tsv 2>/dev/null || true)"
+                if [ -z "$ACCOUNTS" ]; then
+                    echo "predown: no Cognitive Services accounts tagged azd-env-name=$ENVNAME; nothing to clean."
+                    exit 0
+                fi
+                printf '%s\n' "$ACCOUNTS" | while IFS="$(printf '\t')" read -r ACCOUNT RG; do
+                    [ -z "$ACCOUNT" ] && continue
+                    DEPLOYMENTS="$(az cognitiveservices account deployment list -n "$ACCOUNT" -g "$RG" $SUB_ARGS --query "[].name" -o tsv 2>/dev/null || true)"
+                    for DEP in $DEPLOYMENTS; do
+                        echo "predown: deleting model deployment '$DEP' on $ACCOUNT ($RG)"
+                        az cognitiveservices account deployment delete -n "$ACCOUNT" -g "$RG" --deployment-name "$DEP" $SUB_ARGS \
+                            || echo "predown: warning: failed to delete deployment '$DEP' (continuing)"
+                    done
+                done
     prepackage:
         windows:
             shell: pwsh
