@@ -53,6 +53,18 @@
       "aiProjectConnectionsJson": {
         "value": "${AI_PROJECT_CONNECTIONS=[]}"
       },
+      "externalModelBaseUrl": {
+        "value": "${AZURE_FOUNDRY_EXTERNAL_BASE_URL=}"
+      },
+      "externalModelAccountResourceId": {
+        "value": "${AZURE_FOUNDRY_EXTERNAL_ACCOUNT_ID=}"
+      },
+      "externalModelDeploymentName": {
+        "value": "${AZURE_FOUNDRY_EXTERNAL_MODEL_DEPLOYMENT_NAME=}"
+      },
+      "externalModelAuxDeploymentName": {
+        "value": "${AZURE_FOUNDRY_EXTERNAL_AUX_DEPLOYMENT_NAME=}"
+      },
       "aiProjectConnectionCredentialsJson": {
         "value": "${AI_PROJECT_CONNECTION_CREDENTIALS}"
       },

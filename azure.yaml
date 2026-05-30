@@ -55,6 +55,26 @@ hooks:
                         --role $openAiUserRoleId `
                         --scope $aiAccountId | Out-Null
                 }
+
+                # Split-region mode: grant model access on the external AI Services account that hosts the models.
+                $externalAccountId = azd env get-value AZURE_FOUNDRY_MODEL_ACCOUNT_ID 2>$null
+                if ($externalAccountId -and $externalAccountId -ne $aiAccountId) {
+                    $externalSubId = ($externalAccountId -split '/')[2]
+                    $externalRoleDefinitionId = "/subscriptions/$externalSubId/providers/Microsoft.Authorization/roleDefinitions/$openAiUserRoleId"
+                    $externalExisting = az role assignment list `
+                        --assignee-object-id $agentPrincipalId `
+                        --scope $externalAccountId `
+                        --fill-principal-name false `
+                        --query "[?roleDefinitionId=='$externalRoleDefinitionId'].id | [0]" `
+                        -o tsv 2>$null
+                    if (-not $externalExisting) {
+                        az role assignment create `
+                            --assignee-object-id $agentPrincipalId `
+                            --assignee-principal-type ServicePrincipal `
+                            --role $openAiUserRoleId `
+                            --scope $externalAccountId | Out-Null
+                    }
+                }
         posix:
             name: postdeploy
             kind: sh
@@ -87,6 +107,26 @@ hooks:
                         --assignee-principal-type ServicePrincipal \
                         --role "$OPENAI_USER_ROLE_ID" \
                         --scope "$AI_ACCOUNT_ID" >/dev/null
+                fi
+
+                # Split-region mode: grant model access on the external AI Services account that hosts the models.
+                EXTERNAL_ACCOUNT_ID="$(azd env get-value AZURE_FOUNDRY_MODEL_ACCOUNT_ID 2>/dev/null || true)"
+                if [ -n "$EXTERNAL_ACCOUNT_ID" ] && [ "$EXTERNAL_ACCOUNT_ID" != "$AI_ACCOUNT_ID" ]; then
+                    EXTERNAL_SUB_ID="$(printf '%s' "$EXTERNAL_ACCOUNT_ID" | cut -d'/' -f3)"
+                    EXTERNAL_ROLE_DEFINITION_ID="/subscriptions/$EXTERNAL_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/$OPENAI_USER_ROLE_ID"
+                    EXTERNAL_EXISTING="$(az role assignment list \
+                        --assignee-object-id "$AGENT_PRINCIPAL_ID" \
+                        --scope "$EXTERNAL_ACCOUNT_ID" \
+                        --fill-principal-name false \
+                        --query "[?roleDefinitionId=='$EXTERNAL_ROLE_DEFINITION_ID'].id | [0]" \
+                        -o tsv 2>/dev/null || true)"
+                    if [ -z "$EXTERNAL_EXISTING" ]; then
+                        az role assignment create \
+                            --assignee-object-id "$AGENT_PRINCIPAL_ID" \
+                            --assignee-principal-type ServicePrincipal \
+                            --role "$OPENAI_USER_ROLE_ID" \
+                            --scope "$EXTERNAL_ACCOUNT_ID" >/dev/null
+                    fi
                 fi
     predeploy:
         windows:

@@ -92,6 +92,18 @@ param foundryModelApiMode string = 'codex_responses'
 ])
 param foundryModelAuthMode string = 'entra_id'
 
+@description('Optional. OpenAI base URL of a pre-existing AI Services account in another region/account to source models from. When set, no local model deployments are created and the agent calls this endpoint for models. Use the account OpenAI endpoint, e.g. https://<account>.openai.azure.com/.')
+param externalModelBaseUrl string = ''
+
+@description('Optional. Resource ID of the external AI Services account that hosts the models. Used to grant the hosted agent identity model access at postdeploy. Required when externalModelBaseUrl is set.')
+param externalModelAccountResourceId string = ''
+
+@description('Optional. Primary model deployment name on the external account. Required when externalModelBaseUrl is set.')
+param externalModelDeploymentName string = ''
+
+@description('Optional. Auxiliary model deployment name on the external account. Leave empty to omit the auxiliary model.')
+param externalModelAuxDeploymentName string = ''
+
 @description('List of connections')
 param aiProjectConnectionsJson string = '[]'
 
@@ -103,6 +115,8 @@ param aiProjectConnectionCredentialsJson string = '{}'
 param aiProjectDependentResourcesJson string = '[]'
 
 var configuredAiProjectDeployments = json(aiProjectDeploymentsJson)
+// When sourcing models from an external account, do not create any local model deployments.
+var useExternalModels = !empty(externalModelBaseUrl)
 var defaultAiProjectDeployments = [
   {
     name: foundryModelDeploymentName
@@ -117,7 +131,7 @@ var defaultAiProjectDeployments = [
     }
   }
 ]
-var aiProjectDeployments = empty(configuredAiProjectDeployments) ? defaultAiProjectDeployments : configuredAiProjectDeployments
+var aiProjectDeployments = useExternalModels ? [] : (empty(configuredAiProjectDeployments) ? defaultAiProjectDeployments : configuredAiProjectDeployments)
 var aiProjectConnections = json(aiProjectConnectionsJson)
 var aiProjectConnectionCreds = json(aiProjectConnectionCredentialsJson)
 var aiProjectDependentResources = json(aiProjectDependentResourcesJson)
@@ -262,12 +276,14 @@ output AZURE_AI_PROJECT_ENDPOINT string = useExistingAiProject ? existingAiProje
 output FOUNDRY_PROJECT_ENDPOINT string = useExistingAiProject ? existingAiProject.outputs.AZURE_AI_PROJECT_ENDPOINT : aiProject.outputs.AZURE_AI_PROJECT_ENDPOINT
 output AZURE_AI_SERVICES_ENDPOINT string = useExistingAiProject ? existingAiProject.outputs.aiServicesEndpoint : aiProject.outputs.aiServicesEndpoint
 output AZURE_OPENAI_ENDPOINT string = useExistingAiProject ? existingAiProject.outputs.AZURE_OPENAI_ENDPOINT : aiProject.outputs.AZURE_OPENAI_ENDPOINT
-output AZURE_FOUNDRY_BASE_URL string = useExistingAiProject ? existingAiProject.outputs.AZURE_OPENAI_ENDPOINT : aiProject.outputs.AZURE_OPENAI_ENDPOINT
-output AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME string = selectedFoundryModelDeployment.name
-output AZURE_FOUNDRY_MODEL_NAME string = selectedFoundryModelDeployment.model.name
+output AZURE_FOUNDRY_BASE_URL string = useExternalModels ? externalModelBaseUrl : (useExistingAiProject ? existingAiProject.outputs.AZURE_OPENAI_ENDPOINT : aiProject.outputs.AZURE_OPENAI_ENDPOINT)
+output AZURE_FOUNDRY_MODEL_DEPLOYMENT_NAME string = useExternalModels ? externalModelDeploymentName : selectedFoundryModelDeployment.name
+output AZURE_FOUNDRY_MODEL_NAME string = useExternalModels ? externalModelDeploymentName : selectedFoundryModelDeployment.model.name
 output AZURE_FOUNDRY_MODEL_API_MODE string = foundryModelApiMode
 output AZURE_FOUNDRY_AUTH_MODE string = foundryModelAuthMode
-output AZURE_FOUNDRY_AUX_MODEL_DEPLOYMENT_NAME string = length(aiProjectDeployments) > 1 ? aiProjectDeployments[1].name : ''
+output AZURE_FOUNDRY_AUX_MODEL_DEPLOYMENT_NAME string = useExternalModels ? externalModelAuxDeploymentName : (length(aiProjectDeployments) > 1 ? aiProjectDeployments[1].name : '')
+// Resource ID of the account that hosts the models the agent calls. Empty in local mode (agent uses AZURE_AI_ACCOUNT_ID); set to the external account in split mode so postdeploy can grant model access there.
+output AZURE_FOUNDRY_MODEL_ACCOUNT_ID string = useExternalModels ? externalModelAccountResourceId : ''
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = useExistingAiProject ? existingAiProject.outputs.APPLICATIONINSIGHTS_CONNECTION_STRING : aiProject.outputs.APPLICATIONINSIGHTS_CONNECTION_STRING
 output APPLICATIONINSIGHTS_RESOURCE_ID string = useExistingAiProject ? existingAiProject.outputs.APPLICATIONINSIGHTS_RESOURCE_ID : aiProject.outputs.APPLICATIONINSIGHTS_RESOURCE_ID
 
