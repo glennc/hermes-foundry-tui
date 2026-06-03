@@ -4,6 +4,8 @@ PoC integration repo for running the existing Hermes React/Ink TUI against a Her
 
 This repo intentionally stays separate from Hermes. Hermes source is pinned as a Git submodule under `third_party/hermes`, while this repo owns azd infrastructure, deployment glue, local configuration, and integration scaffolding.
 
+The idea is to evolve this into a fully working solution that people can pick up, but it isn't that yet. Help us build it, don't expect it to be easy yet.
+
 ## Repository shape
 
 ```text
